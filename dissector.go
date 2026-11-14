@@ -14,17 +14,16 @@ type ClientHelloInfo struct {
 	ServerName         string
 }
 
+// ParseClientHello parses the TLS ClientHello from r.
+//
+// A single handshake message may be fragmented across several TLS records
+// (RFC 8446 section 5.1), so records are read in a loop until the whole
+// ClientHello handshake message has been accumulated. A parser that inspects
+// only the first record returns io.ErrUnexpectedEOF on such traffic, which in
+// turn makes SNI-based routing drop otherwise perfectly valid connections.
 func ParseClientHello(r io.Reader) (*ClientHelloInfo, error) {
-	record, err := ReadRecord(r)
+	msg, err := readClientHelloMsg(r)
 	if err != nil {
-		return nil, err
-	}
-	if record.Type != Handshake {
-		return nil, ErrBadType
-	}
-
-	msg := &ClientHelloMsg{}
-	if err := msg.Decode(record.Opaque); err != nil {
 		return nil, err
 	}
 
@@ -49,6 +48,47 @@ func ParseClientHello(r io.Reader) (*ClientHelloInfo, error) {
 	}
 
 	return info, nil
+}
+
+// maxClientHelloLen bounds the reassembly buffer. A ClientHello is at most
+// 2^24-1 bytes per the handshake header, but anything near that is abusive.
+const maxClientHelloLen = 64 * 1024
+
+// readClientHelloMsg reassembles the ClientHello handshake message from one or
+// more consecutive handshake records.
+func readClientHelloMsg(r io.Reader) (*ClientHelloMsg, error) {
+	var hs []byte
+	for {
+		record, err := ReadRecord(r)
+		if err != nil {
+			return nil, err
+		}
+		if record.Type != Handshake {
+			return nil, ErrBadType
+		}
+		hs = append(hs, record.Opaque...)
+		if len(hs) > maxClientHelloLen {
+			return nil, fmt.Errorf("client hello too large (over %d bytes)", maxClientHelloLen)
+		}
+		if len(hs) < handshakeHeaderLen {
+			continue // handshake header not complete yet
+		}
+		if hs[0] != ClientHello {
+			return nil, ErrBadType
+		}
+		length := int(hs[1])<<16 | int(hs[2])<<8 | int(hs[3])
+		if length < 34 {
+			return nil, fmt.Errorf("bad length, need at least 34 bytes, got %d", length)
+		}
+		if len(hs) < handshakeHeaderLen+length {
+			continue // handshake message still incomplete, read the next record
+		}
+		msg := &ClientHelloMsg{}
+		if err := msg.Decode(hs[:handshakeHeaderLen+length]); err != nil {
+			return nil, err
+		}
+		return msg, nil
+	}
 }
 
 type ServerHelloInfo struct {
