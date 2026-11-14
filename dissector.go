@@ -1,7 +1,6 @@
 package dissector
 
 import (
-	"fmt"
 	"io"
 )
 
@@ -14,17 +13,25 @@ type ClientHelloInfo struct {
 	ServerName         string
 }
 
+// ParseClientHello parses the TLS ClientHello from r.
+//
+// The message is reassembled from the record layer first: a single handshake
+// message may be fragmented across several TLS records (RFC 5246 §6.2.1,
+// RFC 8446 §5.1). This happens in practice when a middlebox re-segments the
+// record layer, and whenever the ClientHello outgrows one record, which is
+// routine for modern clients whose post-quantum key share pushes the message
+// past 1 KB but also for large ALPN/SNI/extension sets.
+//
+// Records that follow the ClientHello are left unread in r, so the caller can
+// continue parsing the same stream.
 func ParseClientHello(r io.Reader) (*ClientHelloInfo, error) {
-	record, err := ReadRecord(r)
+	raw, err := newHandshakeReader(r).readMessage(ClientHello, true)
 	if err != nil {
 		return nil, err
 	}
-	if record.Type != Handshake {
-		return nil, ErrBadType
-	}
 
 	msg := &ClientHelloMsg{}
-	if err := msg.Decode(record.Opaque); err != nil {
+	if err := msg.Decode(raw); err != nil {
 		return nil, err
 	}
 
@@ -59,26 +66,19 @@ type ServerHelloInfo struct {
 	Version           uint16
 }
 
+// ParseServerHello parses the TLS ServerHello from r, reassembling it if it was
+// fragmented across several TLS records. An alert record in place of the
+// ServerHello is reported as ErrAlert. Records that follow the ServerHello are
+// left unread in r.
 func ParseServerHello(r io.Reader) (*ServerHelloInfo, error) {
-	record, err := ReadRecord(r)
+	h := &handshakeReader{r: r, first: true, alert: true}
+	raw, err := h.readMessage(ServerHello, true)
 	if err != nil {
 		return nil, err
 	}
 
-	switch record.Type {
-	case Handshake:
-	case EncryptedAlert:
-		msg := &AlertMsg{}
-		if err := msg.Decode(record.Opaque); err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("%w: %s", ErrAlert, msg.String())
-	default:
-		return nil, fmt.Errorf("%w %d", ErrBadType, record.Type)
-	}
-
 	msg := &ServerHelloMsg{}
-	if err := msg.Decode(record.Opaque); err != nil {
+	if err := msg.Decode(raw); err != nil {
 		return nil, err
 	}
 
@@ -105,4 +105,9 @@ func ParseServerHello(r io.Reader) (*ServerHelloInfo, error) {
 	}
 
 	return info, nil
+}
+
+// newHandshakeReader wraps r so that handshake messages can span records.
+func newHandshakeReader(r io.Reader) *handshakeReader {
+	return &handshakeReader{r: r, first: true}
 }

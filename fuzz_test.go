@@ -21,8 +21,8 @@ func FuzzParseClientHello(f *testing.F) {
 		f.Add(makeRecordBytes(Handshake, 0x0303, body))
 	}
 	f.Add(makeRecordBytes(AppData, 0x0303, []byte("hello"))) // non-handshake
-	f.Add([]byte{})                                           // empty
-	f.Add([]byte{Handshake, 0x03, 0x03, 0x00, 0x05})          // truncated payload
+	f.Add([]byte{})                                          // empty
+	f.Add([]byte{Handshake, 0x03, 0x03, 0x00, 0x05})         // truncated payload
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ParseClientHello(bytes.NewReader(b))
 	})
@@ -40,5 +40,27 @@ func FuzzParseServerHello(f *testing.F) {
 	f.Add([]byte{})                                              // empty
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ParseServerHello(bytes.NewReader(b))
+	})
+}
+
+// FuzzParseClientHelloFragmented drives the record-reassembly path with
+// attacker-controlled record boundaries. The split point and the bytes are both
+// mutated, so the reassembler sees empty records, one-byte records, cuts inside
+// the 4-byte handshake header and cuts past the declared message length.
+func FuzzParseClientHelloFragmented(f *testing.F) {
+	msg := makeClientHelloMsg()
+	body, err := msg.Encode()
+	if err != nil {
+		return
+	}
+	f.Add(makeRecordBytes(Handshake, 0x0303, body), uint8(len(body)/2))
+	f.Add(makeRecordBytes(Handshake, 0x0303, body), uint8(2))
+	f.Add(makeRecordBytes(Handshake, 0x0303, body), uint8(0))
+	f.Fuzz(func(t *testing.T, b []byte, cut uint8) {
+		c := int(cut) % (len(b) + 1)
+		var stream []byte
+		stream = append(stream, makeRecordBytes(Handshake, 0x0303, b[:c])...)
+		stream = append(stream, makeRecordBytes(Handshake, 0x0303, b[c:])...)
+		_, _ = ParseClientHello(bytes.NewReader(stream))
 	})
 }

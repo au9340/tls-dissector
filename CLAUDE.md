@@ -29,13 +29,14 @@ Four layers, each in its own file, stacked bottom-up:
 | Layer | File | Responsibility |
 |-------|------|----------------|
 | Record | `record.go` | TLS record framing: `ReadRecord`, `Record` struct, content type constants |
+| Reassembly | `handshake.go` | `handshakeReader` flattens records into a handshake byte stream; `ReadHandshakeMessage`, `MaxHandshakeLength` |
 | Handshake | `msg.go` | `ClientHelloMsg`, `ServerHelloMsg`, `AlertMsg` — each with `ReadFrom`/`WriteTo`/`Decode`/`Encode` |
 | Extensions | `extension.go` | `Extension` interface + 11 concrete types + `NewExtension` factory |
 | Public API | `dissector.go` | `ParseClientHello`, `ParseServerHello`, `ClientHelloInfo`, `ServerHelloInfo` |
 
-**Data flow**: raw bytes → `ReadRecord` (TLS record) → handshake message `Decode` → extension extraction → info structs.
+**Data flow**: raw bytes → `ReadRecord` (TLS record) → `handshakeReader` reassembly (message may span records) → handshake message `Decode` → extension extraction → info structs.
 
-**Only ClientHello and ServerHello are parsed.** No Certificate, ServerKeyExchange, Finished, or other handshake messages. Assumes each handshake message fits in a single TLS record (no fragmentation).
+**Only ClientHello and ServerHello are parsed.** No Certificate, ServerKeyExchange, Finished, or other handshake messages. A message fragmented over consecutive TLS records is reassembled before decoding; records after the message stay unread in the reader.
 
 ## Key patterns
 
@@ -47,4 +48,4 @@ Four layers, each in its own file, stacked bottom-up:
 
 ## Testing
 
-Tests use captured TLS handshake bytes from real connections (stored as inline hex dumps). Test strategy: encode a known-good message, then round-trip through decode/encode and compare. Coverage: 99.8% across 4 test files.
+Tests use captured TLS handshake bytes from real connections (stored as inline hex dumps). Test strategy: encode a known-good message, then round-trip through decode/encode and compare. Fragmentation is tested by cutting the encoded message at every byte offset and re-framing it into records. Coverage: 97.2% across 5 test files (100% of the reassembly path).
