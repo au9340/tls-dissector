@@ -1,0 +1,110 @@
+name: gost v3 linux/amd64
+
+# Builds the real product: go-gost/gost (v3) with this repository's
+# tls-dissector swapped in through a `replace` directive, so the resulting
+# binary actually carries the handshake record-reassembly fix. gost reaches
+# tls-dissector indirectly (gost -> go-gost/x -> tls-dissector), so a replace in
+# gost's own go.mod is enough and no fork of gost or x is needed.
+#
+# Only the linux/amd64 target is produced: the binary is uploaded as a workflow
+# artifact and attached to a release so it stays downloadable after artifacts
+# expire.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - ".github/workflows/gost-linux-amd64.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tls-dissector
+        uses: actions/checkout@v4
+        with:
+          path: tls-dissector
+
+      - name: Checkout gost
+        uses: actions/checkout@v4
+        with:
+          repository: go-gost/gost
+          ref: master
+          path: gost
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: gost/go.mod
+          cache-dependency-path: gost/go.sum
+
+      - name: Point gost at this tls-dissector
+        working-directory: gost
+        run: |
+          set -euo pipefail
+          go mod edit -replace github.com/go-gost/tls-dissector=../tls-dissector
+          # Fail loudly if the replacement is not actually in effect: if gost
+          # stopped depending on tls-dissector the build would be pointless.
+          go list -m -f '{{.Path}} {{.Version}} => {{.Replace.Dir}}' github.com/go-gost/tls-dissector
+
+      - name: Build gost for linux/amd64
+        working-directory: gost
+        run: |
+          set -euo pipefail
+          base=$(sed -n 's/^const buildVersionFallback = "\(.*\)"/\1/p' cmd/gost/version.go)
+          sha=$(git -C ../tls-dissector rev-parse --short=7 HEAD)
+          version="${base}-tlsreasm.${sha}"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${sha}" >> "$GITHUB_ENV"
+
+          mkdir -p ../dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 \
+            go build -trimpath \
+              -ldflags "-s -w -X 'main.version=${version}'" \
+              -o ../dist/gost ./cmd/gost
+
+          file ../dist/gost
+          ../dist/gost -V
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          cd dist
+          tar -czf "gost_${VERSION}_linux_amd64.tar.gz" gost
+          sha256sum gost_*.tar.gz > checksums.txt
+          ls -l
+          cat checksums.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gost-${{ env.VERSION }}-linux-amd64
+          path: |
+            dist/gost_*_linux_amd64.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="gost-amd64-${VERSION}-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" dist/gost_*_linux_amd64.tar.gz dist/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "gost v3 linux/amd64 ${VERSION}" \
+            --notes "gost v3 (go-gost/gost@master) built with tls-dissector@${SHORT_SHA} from branch \`${GITHUB_REF_NAME}\` — includes TLS handshake record reassembly. CGO disabled, GOAMD64=v1."
+
+          {
+            echo "### gost v3 linux/amd64"
+            echo
+            echo "- version: \`${VERSION}\`"
+            echo "- tls-dissector: \`${SHORT_SHA}\` (${GITHUB_REF_NAME})"
+            echo "- download: https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/gost_${VERSION}_linux_amd64.tar.gz"
+          } >> "$GITHUB_STEP_SUMMARY"
