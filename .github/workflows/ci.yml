@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  # Manual trigger: Actions -> CI -> Run workflow. Handy to re-run the build
+  # without pushing a new commit.
+  workflow_dispatch:
   # Build on every branch push, not just master/main, so a feature branch gets
   # verified as soon as it is pushed instead of only when a PR is opened.
   push:
