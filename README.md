@@ -33,11 +33,22 @@ resp, err := dissector.ParseServerHello(reader)
 Data flows through four layers:
 
 1. **TLS Record** — `ReadRecord` consumes a 5-byte header + payload, checking the content type (Handshake, Alert, etc.)
-2. **Handshake** — the record payload is decoded as a `ClientHelloMsg` or `ServerHelloMsg`, with length-prefixed fields parsed sequentially
-3. **Extensions** — the trailing extension block is parsed into typed extension structs via the `Extension` interface
-4. **Info extraction** — relevant fields are pulled from the messages and extensions into flat `ClientHelloInfo` / `ServerHelloInfo` structs
+2. **Reassembly** — handshake bytes from consecutive records are concatenated until the complete handshake message (4-byte header + declared body) is available, so a message fragmented across records is handled transparently
+3. **Handshake** — the reassembled message is decoded as a `ClientHelloMsg` or `ServerHelloMsg`, with length-prefixed fields parsed sequentially
+4. **Extensions** — the trailing extension block is parsed into typed extension structs via the `Extension` interface
+5. **Info extraction** — relevant fields are pulled from the messages and extensions into flat `ClientHelloInfo` / `ServerHelloInfo` structs
 
-The library is a **passthrough parser**: only ClientHello and ServerHello are understood. Other handshake messages are not parsed. Each handshake message is assumed to fit in a single TLS record (no fragmentation support).
+The library is a **passthrough parser**: only ClientHello and ServerHello are understood. Other handshake messages are not parsed, but they can still be reassembled with `ReadHandshakeMessage`.
+
+### Record-layer reassembly
+
+A handshake message is not guaranteed to fit in one TLS record: RFC 5246 §6.2.1 and RFC 8446 §5.1 allow a message to be fragmented across consecutive records, and middleboxes that rewrite or re-segment the record layer produce exactly that. Both `ParseClientHello` and `ParseServerHello` therefore read records in a loop until the message announced by the handshake header is complete:
+
+- any split point is supported — inside the 4-byte header, the session ID, the cipher-suite list, the extension block or the SNI hostname;
+- empty (`length == 0`) handshake records are skipped;
+- non-handshake records interleaved with the message are rejected with `ErrBadType` (RFC 8446 forbids interleaving);
+- reassembly is bounded by `MaxHandshakeLength` (64 KiB, header included), so a hostile 24-bit length field cannot force an unbounded allocation;
+- records *after* the message are left unread, so a proxy can keep reading the same stream (bytes that follow the message inside the completing record are consumed with that record, as with any record-oriented parser).
 
 ## API
 
@@ -48,6 +59,12 @@ func ParseServerHello(r io.Reader) (*ServerHelloInfo, error)
 
 // Record layer
 func ReadRecord(r io.Reader) (*Record, error)
+
+// Handshake reassembly: returns the handshake type and the message body
+// (everything after the 4-byte handshake header), reassembled from records
+func ReadHandshakeMessage(r io.Reader) (typ uint8, body []byte, err error)
+
+const MaxHandshakeLength = 64 * 1024 // reassembly size cap, header included
 
 // Extension system
 type Extension interface {
@@ -88,7 +105,7 @@ Unknown extensions are preserved as opaque bytes. New extensions can be added by
 go test -v -cover ./...
 ```
 
-Coverage: 99.8% across 4 test files covering record parsing, handshake messages, all 11 extensions, and end-to-end parse functions.
+Coverage: 97.2% (100% of the reassembly path) across 5 test files covering record parsing, handshake messages, all 11 extensions, end-to-end parse functions, and record-fragmented handshakes.
 
 ## License
 

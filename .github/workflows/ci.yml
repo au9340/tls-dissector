@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Build on every branch push, not just master/main, so a feature branch gets
+  # verified as soon as it is pushed instead of only when a PR is opened.
   push:
-    branches: [master, main]
+    branches: ["**"]
   pull_request:
 
 permissions:
